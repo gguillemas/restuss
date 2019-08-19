@@ -1,6 +1,2 @@
-# external packages folder
-vendor/
-.idea
+*.swp
 .DS_Store
-# here you can put any sort of file useful to test the code written
-cmd/

@@ -2,10 +2,14 @@ package restuss
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"io/ioutil"
+	"log"
 	"net/http"
 	"strconv"
 )
@@ -13,14 +17,17 @@ import (
 // Client expose the methods callable on Nessus Api
 type Client interface {
 	GetScanTemplates() ([]*ScanTemplate, error)
-	LaunchScan(scanId int64) error
-	StopScan(scanId int64) error
+	LaunchScan(scanID int64) error
+	StopScan(scanID int64) error
+	DeleteScan(scanID int64) error
 	CreateScan(scan *Scan) (*PersistedScan, error)
 	GetScans(lastModificationDate int64) ([]*PersistedScan, error)
 	GetScanByID(id int64) (*ScanDetail, error)
 	GetPluginByID(id int64) (*Plugin, error)
+	GetPluginOutput(scanID, hostID, pluginID int64) (*PluginOutputResponse, error)
 }
 
+// NessusClient implements nessus.Client
 type NessusClient struct {
 	auth       AuthProvider
 	url        string
@@ -48,68 +55,87 @@ func NewClient(auth AuthProvider, url string, allowInsecureConnection bool) (*Ne
 	return &NessusClient{auth: auth, url: url, httpClient: c}, nil
 }
 
-// GetScanTemplates retrieves Scan Templates
-func (c *NessusClient) GetScanTemplates() ([]*ScanTemplate, error) {
+// GetScanTemplatesContext retrieves the Scan templates ussing the given context.
+func (c *NessusClient) GetScanTemplatesContext(ctx context.Context) ([]*ScanTemplate, error) {
 	req, err := http.NewRequest(http.MethodGet, c.url+"/editor/scan/templates", nil)
-
 	if err != nil {
 		return nil, errors.New("Unable to create request object: " + err.Error())
 	}
-
+	req = req.WithContext(ctx)
 	var data struct {
 		Templates []*ScanTemplate `json:"templates"`
 	}
-
 	err = c.performCallAndReadResponse(req, &data)
 	if err != nil {
 		return nil, errors.New("Call failed: " + err.Error())
 	}
-
 	return data.Templates, nil
+}
+
+// GetScanTemplates retrieves Scan Templates
+func (c *NessusClient) GetScanTemplates() ([]*ScanTemplate, error) {
+	return c.GetScanTemplatesContext(context.Background())
 }
 
 // LaunchScan launch spe scan with the specified scanID
 func (c *NessusClient) LaunchScan(scanID int64) error {
+	return c.LaunchScanContext(context.Background(), scanID)
+}
+
+// LaunchScanContext launch the scan with the specified scanID and context.
+func (c *NessusClient) LaunchScanContext(ctx context.Context, scanID int64) error {
 	path := "/scans/" + strconv.FormatInt(scanID, 10) + "/launch"
 	req, err := http.NewRequest(http.MethodPost, c.url+path, nil)
-
 	if err != nil {
 		return errors.New("Unable to create request object: " + err.Error())
 	}
-
-	err = c.performCallAndReadResponse(req, nil)
-
-	if err != nil {
-		return err
-	}
-
-	return nil
+	req = req.WithContext(ctx)
+	return c.performCallAndReadResponse(req, nil)
 }
 
 // StopScan stops the scan with the given scanID
 func (c *NessusClient) StopScan(scanID int64) error {
+	return c.StopScanContext(context.Background(), scanID)
+}
+
+// StopScanContext stops the scan with the given scanID
+func (c *NessusClient) StopScanContext(ctx context.Context, scanID int64) error {
 	path := "/scans/" + strconv.FormatInt(scanID, 10) + "/stop"
 	req, err := http.NewRequest(http.MethodPost, c.url+path, nil)
-
 	if err != nil {
 		return errors.New("Unable to create request object: " + err.Error())
 	}
+	req = req.WithContext(ctx)
+	return c.performCallAndReadResponse(req, nil)
+}
 
-	err = c.performCallAndReadResponse(req, nil)
+// DeleteScan will remove the scan with the given scanID
+func (c *NessusClient) DeleteScan(scanID int64) error {
+	return c.DeleteScanContext(context.Background(), scanID)
+}
+
+// DeleteScanContext will remove the scan with the given scanID and context.
+func (c *NessusClient) DeleteScanContext(ctx context.Context, scanID int64) error {
+	path := "/scans/" + strconv.FormatInt(scanID, 10)
+	req, err := http.NewRequest(http.MethodDelete, c.url+path, nil)
 	if err != nil {
-		return err
+		return errors.New("Unable to create request object: " + err.Error())
 	}
-
-	return nil
+	req = req.WithContext(ctx)
+	return c.performCallAndReadResponse(req, nil)
 }
 
 // CreateScan creates a scan
 func (c *NessusClient) CreateScan(scan *Scan) (*PersistedScan, error) {
+	return c.CreateScanContext(context.Background(), scan)
+}
+
+// CreateScanContext creates a scan with the given scan data and context.
+func (c *NessusClient) CreateScanContext(ctx context.Context, scan *Scan) (*PersistedScan, error) {
 	jsonBody, err := json.Marshal(scan)
 	if err != nil {
 		return nil, errors.New("Unable to marshall request body" + err.Error())
 	}
-
 	req, err := http.NewRequest(http.MethodPost, c.url+"/scans", bytes.NewBuffer(jsonBody))
 	if err != nil {
 		return nil, errors.New("Unable to create request object: " + err.Error())
@@ -120,7 +146,7 @@ func (c *NessusClient) CreateScan(scan *Scan) (*PersistedScan, error) {
 	var result struct {
 		Scan PersistedScan `json:"scan"`
 	}
-
+	req = req.WithContext(ctx)
 	err = c.performCallAndReadResponse(req, &result)
 	if err != nil {
 		return nil, err
@@ -131,6 +157,11 @@ func (c *NessusClient) CreateScan(scan *Scan) (*PersistedScan, error) {
 
 // GetScans get a list of scan matching the provided lastModificationDate (check Nessus documentation)
 func (c *NessusClient) GetScans(lastModificationDate int64) ([]*PersistedScan, error) {
+	return c.GetScansContext(context.Background(), lastModificationDate)
+}
+
+// GetScansContext get a list of scan matching the provided lastModificationDate (check Nessus documentation) and context.
+func (c *NessusClient) GetScansContext(ctx context.Context, lastModificationDate int64) ([]*PersistedScan, error) {
 	req, err := http.NewRequest(http.MethodGet, c.url+"/scans", nil)
 	if err != nil {
 		return nil, errors.New("Unable to create request object: " + err.Error())
@@ -145,7 +176,7 @@ func (c *NessusClient) GetScans(lastModificationDate int64) ([]*PersistedScan, e
 	var data struct {
 		Scans []*PersistedScan `json:"scans"`
 	}
-
+	req = req.WithContext(ctx)
 	err = c.performCallAndReadResponse(req, &data)
 	if err != nil {
 		return nil, err
@@ -156,6 +187,11 @@ func (c *NessusClient) GetScans(lastModificationDate int64) ([]*PersistedScan, e
 
 // GetScanByID retrieve a scan by ID
 func (c *NessusClient) GetScanByID(ID int64) (*ScanDetail, error) {
+	return c.GetScanByIDContext(context.Background(), ID)
+}
+
+// GetScanByIDContext retrieve a scan by ID
+func (c *NessusClient) GetScanByIDContext(ctx context.Context, ID int64) (*ScanDetail, error) {
 	path := fmt.Sprintf("/scans/%d", ID)
 
 	req, err := http.NewRequest(http.MethodGet, c.url+path, nil)
@@ -164,7 +200,7 @@ func (c *NessusClient) GetScanByID(ID int64) (*ScanDetail, error) {
 	}
 
 	scanDetail := &ScanDetail{}
-
+	req = req.WithContext(ctx)
 	err = c.performCallAndReadResponse(req, &scanDetail)
 	if err != nil {
 		return nil, err
@@ -177,6 +213,11 @@ func (c *NessusClient) GetScanByID(ID int64) (*ScanDetail, error) {
 
 // GetPluginByID retrieves a plugin by ID
 func (c *NessusClient) GetPluginByID(ID int64) (*Plugin, error) {
+	return c.GetPluginByIDContext(context.Background(), ID)
+}
+
+// GetPluginByIDContext retrieves a plugin by ID using the given context.
+func (c *NessusClient) GetPluginByIDContext(ctx context.Context, ID int64) (*Plugin, error) {
 	path := fmt.Sprintf("/plugins/plugin/%d", ID)
 
 	req, err := http.NewRequest(http.MethodGet, c.url+path, nil)
@@ -185,7 +226,7 @@ func (c *NessusClient) GetPluginByID(ID int64) (*Plugin, error) {
 	}
 
 	p := &Plugin{}
-
+	req = req.WithContext(ctx)
 	err = c.performCallAndReadResponse(req, p)
 	if err != nil {
 		return nil, err
@@ -194,17 +235,108 @@ func (c *NessusClient) GetPluginByID(ID int64) (*Plugin, error) {
 	return p, nil
 }
 
-func (c *NessusClient) performCallAndReadResponse(req *http.Request, data interface{}) error {
-	c.auth.AddAuthHeaders(req)
+// GetPluginOutput retrieves output from a plugin ran against a target
+func (c *NessusClient) GetPluginOutput(scanID, hostID, pluginID int64) (*PluginOutputResponse, error) {
+	return c.GetPluginOutputContext(context.Background(), scanID, hostID, pluginID)
+}
 
+// GetPluginOutputContext retrieves output from a plugin ran against a target using the given context.
+func (c *NessusClient) GetPluginOutputContext(ctx context.Context, scanID, hostID, pluginID int64) (*PluginOutputResponse, error) {
+	path := fmt.Sprintf("/scans/%d/hosts/%d/plugins/%d", scanID, hostID, pluginID)
+
+	req, err := http.NewRequest(http.MethodGet, c.url+path, nil)
+	if err != nil {
+		return nil, errors.New("Unable to create request object: " + err.Error())
+	}
+
+	output := &PluginOutputResponse{}
+	req = req.WithContext(ctx)
+	err = c.performCallAndReadResponse(req, output)
+	if err != nil {
+		return nil, err
+	}
+
+	return output, nil
+}
+
+// GetPolicyByID retrieves a policy by ID
+func (c *NessusClient) GetPolicyByID(ID int64) (*Policy, error) {
+	path := fmt.Sprintf("/policies/%d", ID)
+
+	req, err := http.NewRequest(http.MethodGet, c.url+path, nil)
+	if err != nil {
+		return nil, errors.New("Unable to create request object: " + err.Error())
+	}
+
+	p := &Policy{}
+
+	err = c.performCallAndReadResponse(req, p)
+	if err != nil {
+		return nil, err
+	}
+	p.ID = ID
+
+	return p, nil
+}
+
+// GetPolicyByIDContext retrieves a policy by ID using the given context.
+func (c *NessusClient) GetPolicyByIDContext(ctx context.Context, ID int64) (*Policy, error) {
+	path := fmt.Sprintf("/policies/%d", ID)
+
+	req, err := http.NewRequest(http.MethodGet, c.url+path, nil)
+	if err != nil {
+		return nil, errors.New("Unable to create request object: " + err.Error())
+	}
+
+	p := &Policy{}
+	req = req.WithContext(ctx)
+	err = c.performCallAndReadResponse(req, p)
+	if err != nil {
+		return nil, err
+	}
+	p.ID = ID
+
+	return p, nil
+}
+
+// TODO: add rate limit handling:
+// https://cloud.tenable.com/api#/ratelimiting
+func (c *NessusClient) performCallAndReadResponse(req *http.Request, data interface{}) error {
+	var reqBodyBytes []byte
+	var err error
+
+	if req.Body != nil {
+		reqBodyBytes, err = ioutil.ReadAll(req.Body)
+		if err != nil {
+			return errors.New("Failed to read request body: " + err.Error())
+		}
+	}
+
+	// Restore the io.ReadCloser to its original state
+	req.Body = ioutil.NopCloser(bytes.NewBuffer(reqBodyBytes))
+
+	c.auth.AddAuthHeaders(req)
 	res, err := c.httpClient.Do(req)
 	if err != nil {
 		return errors.New("Failed call: " + err.Error())
 	}
-
-	defer res.Body.Close()
+	defer func(body io.ReadCloser) {
+		errC := body.Close()
+		if errC != nil {
+			log.Printf("Error when closing response body: %v", errC)
+		}
+	}(res.Body)
 
 	if res.StatusCode > 299 {
+		log.Printf("Request URL: %v", req.URL)
+		log.Printf("Request body: %v", string(reqBodyBytes))
+		buf, err := ioutil.ReadAll(res.Body)
+		if err != nil {
+			log.Printf("Error when reading response body: %v", err)
+		}
+		log.Printf("Response status code: %v", res.StatusCode)
+		log.Printf("Response body: %v", string(buf))
+
 		return errors.New("Call failed, status code: " + strconv.Itoa(res.StatusCode))
 	}
 
@@ -216,6 +348,5 @@ func (c *NessusClient) performCallAndReadResponse(req *http.Request, data interf
 			return errors.New("Failed to read the response: " + err.Error())
 		}
 	}
-
 	return nil
 }

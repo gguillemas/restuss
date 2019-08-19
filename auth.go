@@ -15,7 +15,7 @@ type AuthProvider interface {
 type BasicAuthProvider struct {
 	username string
 	password string
-	token    string
+	// token    string
 }
 
 // NewBasicAuthProvider returns a new BasicAuthProvider
@@ -25,14 +25,11 @@ func NewBasicAuthProvider(username string, password string) *BasicAuthProvider {
 
 // AddAuthHeaders add auth headers
 func (b *BasicAuthProvider) AddAuthHeaders(r *http.Request) {
-	panic("not supported yet")
+	r.SetBasicAuth(b.username, b.password)
 }
 
 // Prepare performs tasks required pre-auth, it should be called before AddAuthHeaders can be used
 func (b *BasicAuthProvider) Prepare(url string, c *http.Client) error {
-	//todo perform api request and get the token -> b.token
-	//todo then use the token in addAuthHeaders
-	panic("not supported yet")
 	return nil
 }
 
