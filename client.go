@@ -10,8 +10,12 @@ import (
 	"io"
 	"io/ioutil"
 	"log"
+	"math/rand"
 	"net/http"
 	"strconv"
+	"time"
+
+	"github.com/jpillora/backoff"
 )
 
 // Client expose the methods callable on Nessus Api
@@ -299,45 +303,88 @@ func (c *NessusClient) GetPolicyByIDContext(ctx context.Context, ID int64) (*Pol
 	return p, nil
 }
 
-// TODO: add rate limit handling:
-// https://cloud.tenable.com/api#/ratelimiting
 func (c *NessusClient) performCallAndReadResponse(req *http.Request, data interface{}) error {
-	var reqBodyBytes []byte
-	var err error
+	// We implement backoff in all requests as the Tenable.io API
+	// is returning non-successful status codes inconsistently
+	// and it returns 500 errors to "try again later".
+	b := &backoff.Backoff{
+		Min:    100 * time.Millisecond,
+		Max:    60 * time.Second,
+		Factor: 1.5,
+		Jitter: true,
+	}
 
+	rand.Seed(time.Now().UnixNano())
+
+	// Copy the contents of the response body for logging.
+	var err error
+	var reqBodyBytes []byte
 	if req.Body != nil {
 		reqBodyBytes, err = ioutil.ReadAll(req.Body)
 		if err != nil {
 			return errors.New("Failed to read request body: " + err.Error())
 		}
 	}
-
-	// Restore the io.ReadCloser to its original state
+	// Restore the reader to its original state.
 	req.Body = ioutil.NopCloser(bytes.NewBuffer(reqBodyBytes))
 
-	c.auth.AddAuthHeaders(req)
-	res, err := c.httpClient.Do(req)
-	if err != nil {
-		return errors.New("Failed call: " + err.Error())
-	}
-	defer func(body io.ReadCloser) {
-		errC := body.Close()
-		if errC != nil {
-			log.Printf("Error when closing response body: %v", errC)
-		}
-	}(res.Body)
-
-	if res.StatusCode > 299 {
-		log.Printf("Request URL: %v", req.URL)
-		log.Printf("Request body: %v", string(reqBodyBytes))
-		buf, err := ioutil.ReadAll(res.Body)
+	var res *http.Response
+	// Try 10 times then return an error.
+	for i := 0; i < 10; i++ {
+		c.auth.AddAuthHeaders(req)
+		res, err := c.httpClient.Do(req)
 		if err != nil {
-			log.Printf("Error when reading response body: %v", err)
+			return errors.New("Failed call: " + err.Error())
 		}
-		log.Printf("Response status code: %v", res.StatusCode)
-		log.Printf("Response body: %v", string(buf))
+		defer func(body io.ReadCloser) {
+			errC := body.Close()
+			if errC != nil {
+				log.Printf("Error when closing response body: %v", errC)
+			}
+		}(res.Body)
 
-		return errors.New("Call failed, status code: " + strconv.Itoa(res.StatusCode))
+		// Honoring rate limits:
+		// https://cloud.tenable.com/api#/ratelimiting
+		if res.StatusCode == 429 {
+			var err error
+			var retryTime int
+			retryAfter := res.Header.Get("retry-after")
+			if retryAfter != "" {
+				retryTime, err = strconv.Atoi(retryAfter)
+				if err != nil {
+					log.Printf("Error when reading \"retry-after\" header: %v", err)
+				}
+			} else {
+				retryTime = 30
+			}
+
+			log.Printf("Rate limit reached, trying again in %v seconds", retryTime)
+			time.Sleep(time.Duration(retryTime) * time.Second)
+			continue
+		}
+
+		// We capture all non-2XX codes the same as the Tenable.io API returns
+		// unexpected error codes in response to internal errors, such as 404
+		// when a scan is incorrectly created on their end, unexpected 403
+		// when retrieving the status of a scan or apparently intended 500
+		// when an unknown request limit is exceeded.
+		if res.StatusCode >= 300 {
+			log.Printf("Request URL: %v", req.URL)
+			log.Printf("Request body: %v", string(reqBodyBytes))
+			buf, err := ioutil.ReadAll(res.Body)
+			if err != nil {
+				log.Printf("Error when reading response body: %v", err)
+			}
+			log.Printf("Response status code: %v", res.StatusCode)
+			log.Printf("Response body: %v", string(buf))
+
+			d := b.Duration()
+			log.Printf(
+				"Unpexpected status code: %v, trying again in %v",
+				res.StatusCode, d,
+			)
+			time.Sleep(d)
+		}
 	}
 
 	if data != nil {
@@ -348,5 +395,6 @@ func (c *NessusClient) performCallAndReadResponse(req *http.Request, data interf
 			return errors.New("Failed to read the response: " + err.Error())
 		}
 	}
+
 	return nil
 }
