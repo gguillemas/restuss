@@ -328,20 +328,15 @@ func (c *NessusClient) performCallAndReadResponse(req *http.Request, data interf
 	// Restore the reader to its original state.
 	req.Body = ioutil.NopCloser(bytes.NewBuffer(reqBodyBytes))
 
-	var res *http.Response
 	// Try 10 times then return an error.
+	success := false
+	var res *http.Response
 	for i := 0; i < 10; i++ {
 		c.auth.AddAuthHeaders(req)
 		res, err := c.httpClient.Do(req)
 		if err != nil {
 			return errors.New("Failed call: " + err.Error())
 		}
-		defer func(body io.ReadCloser) {
-			errC := body.Close()
-			if errC != nil {
-				log.Printf("Error when closing response body: %v", errC)
-			}
-		}(res.Body)
 
 		// Honoring rate limits:
 		// https://cloud.tenable.com/api#/ratelimiting
@@ -371,10 +366,16 @@ func (c *NessusClient) performCallAndReadResponse(req *http.Request, data interf
 		if res.StatusCode >= 300 {
 			log.Printf("Request URL: %v", req.URL)
 			log.Printf("Request body: %v", string(reqBodyBytes))
+
 			buf, err := ioutil.ReadAll(res.Body)
 			if err != nil {
 				log.Printf("Error when reading response body: %v", err)
 			}
+			err = res.Body.Close()
+			if err != nil {
+				log.Printf("Error when closing response body: %v", err)
+			}
+
 			log.Printf("Response status code: %v", res.StatusCode)
 			log.Printf("Response body: %v", string(buf))
 
@@ -383,8 +384,24 @@ func (c *NessusClient) performCallAndReadResponse(req *http.Request, data interf
 				"Unpexpected status code: %v, trying again in %v",
 				res.StatusCode, d,
 			)
+
 			time.Sleep(d)
+			continue
 		}
+
+		success = true
+		break
+	}
+
+	defer func(body io.ReadCloser) {
+		errC := body.Close()
+		if errC != nil {
+			log.Printf("Error when closing response body: %v", errC)
+		}
+	}(res.Body)
+
+	if !success {
+		return errors.New("Retry limit exceeded")
 	}
 
 	if data != nil {
